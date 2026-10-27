@@ -12,20 +12,45 @@ jobs:
   remove-validated-label:
     name: Remove reusable validated label
     runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'validated')
     steps:
+      # Pushes from the web-sdk team keep their validated label. The default
+      # GITHUB_TOKEN cannot read org team membership, so this uses
+      # ORG_READ_TOKEN (a token with the org "Members: read" permission). The
+      # team's actual membership is the single source of truth — no usernames
+      # are hardcoded here.
+      - name: Check whether the pusher is on the web-sdk team
+        id: team
+        env:
+          GH_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          ORG: webex
+          TEAM_SLUG: web-sdk
+        run: |
+          # The memberships endpoint returns 200 with state "active" for current
+          # members, 200 with state "pending" for invited-but-not-joined users,
+          # and 404 for everyone else. Only an active membership exempts a push.
+          # Any failure (missing token, API error) leaves STATE empty so the
+          # label is removed, which is the safe outcome.
+          STATE=$(gh api \
+            "orgs/$ORG/teams/$TEAM_SLUG/memberships/$ACTOR" \
+            --jq '.state' 2>/dev/null) || STATE=""
+          if [ "$STATE" = "active" ]; then
+            echo "Actor '$ACTOR' is an active member of @$ORG/$TEAM_SLUG; keeping the validated label."
+            echo "is_member=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Actor '$ACTOR' is not an active member of @$ORG/$TEAM_SLUG."
+            echo "is_member=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Remove validated label from PR
+        if: steps.team.outputs.is_member != 'true'
         uses: actions/github-script@v8
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const pull_number = context.payload.pull_request.number;
-
-            const labels = context.payload.pull_request.labels.map((label) => label.name);
-            if (!labels.includes('validated')) {
-              core.info('No validated label found; skipping.');
-              return;
-            }
 
             try {
               await github.rest.issues.removeLabel({
